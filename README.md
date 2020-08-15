@@ -1,0 +1,1 @@
+# aws-azure-login-go
