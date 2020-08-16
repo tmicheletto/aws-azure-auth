@@ -17,8 +17,9 @@ package cmd
 
 import (
 	"fmt"
-	"github.com/spf13/cobra"
 	"os"
+
+	"github.com/spf13/cobra"
 
 	homedir "github.com/mitchellh/go-homedir"
 	"github.com/spf13/viper"
@@ -28,7 +29,7 @@ var cfgFile string
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "aws-azure-login",
+	Use:   "aws-auth",
 	Short: "A brief description of your application",
 	Long: `A longer description that spans multiple lines and likely contains
 examples and usage of using your application. For example:
@@ -57,7 +58,7 @@ func init() {
 	// Cobra supports persistent flags, which, if defined here,
 	// will be global for your application.
 
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.aws-azure-login.yaml)")
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.aws-auth.yaml)")
 
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.
@@ -77,9 +78,9 @@ func initConfig() {
 			os.Exit(1)
 		}
 
-		// Search config in home directory with name ".aws-azure-login" (without extension).
+		// Search config in home directory with name ".aws-auth" (without extension).
 		viper.AddConfigPath(home)
-		viper.SetConfigName(".aws-azure-login")
+		viper.SetConfigName(".aws-auth")
 	}
 
 	viper.AutomaticEnv() // read in environment variables that match

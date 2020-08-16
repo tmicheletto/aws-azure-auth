@@ -15,7 +15,7 @@ limitations under the License.
 */
 package main
 
-import "aws-azure-login-go/cmd"
+import "aws-azure-auth/cmd"
 
 func main() {
 	cmd.Execute()
