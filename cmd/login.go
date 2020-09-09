@@ -5,18 +5,15 @@ import (
 	"compress/flate"
 	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
+	"github.com/chromedp/cdproto/cdp"
+	"github.com/chromedp/cdproto/fetch"
 	"github.com/chromedp/cdproto/network"
-	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
-	"github.com/davecgh/go-spew/spew"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"log"
 	"net/url"
-	"strings"
 	"time"
 )
 
@@ -56,12 +53,24 @@ func execute(cmd *cobra.Command, args []string) error {
 	//defer cancel()
 
 	chromedp.ListenTarget(ctx, func(ev interface{}) {
-		switch ev := ev.(type) {
-		case *network.EventRequestWillBeSent:
-			if strings.Contains(ev.Request.URL, "saml") {
-				fmt.Printf("Event type: %s\n", ev.Type.String())
-				fmt.Printf("Request Url: %v\n", ev.Request.URL)
-			}
+		switch evnt := ev.(type) {
+		case *fetch.EventRequestPaused:
+			go func(evt *fetch.EventRequestPaused) {
+				nctx := chromedp.FromContext(ctx)
+				lctx := cdp.WithExecutor(ctx, nctx.Target)
+				requestId := evt.RequestID
+				//body, err := fetch.GetResponseBody(requestId).Do(lctx)
+				//if err != nil {
+				//	log.Println(" Statuscode:" + strconv.Itoa(int(evt.ResponseStatusCode)) + "fail to get the response body " + err.Error())
+				//}
+				fmt.Printf("Url: :%s, RequestID: %s, Data: %s\n", evt.Request.URL, requestId, evt.Request.PostData)
+				defer func() {
+					err := fetch.FulfillRequest(requestId, 200).WithResponseHeaders([]*fetch.HeaderEntry{ { Name: "Content-Type", Value: "text/plain"} }).WithBody("").Do(lctx)
+					if err != nil {
+						fmt.Println("Error with continuerequest," + err.Error())
+					}
+				}()
+			}(evnt)
 		}
 	})
 
@@ -85,90 +94,28 @@ func execute(cmd *cobra.Command, args []string) error {
 	emailElement := `//input[@type="email"]`
 	passwordElement := `//input[@type="password"]`
 	submitElement := `//input[@type="submit"]`
-	//chromedp.Submit(email)
-	if err := chromedp.Run(ctx, chromedp.Navigate(url),
+
+	if err := chromedp.Run(ctx,
+		network.Enable(),
+		fetch.Enable().WithPatterns([]*fetch.RequestPattern{{URLPattern: AWS_SAML_ENDPOINT, RequestStage: "Response"}}).WithHandleAuthRequests(true),
+		chromedp.Navigate(url),
 		chromedp.WaitVisible("html > body"),
 		chromedp.SendKeys(emailElement, azureADUserName),
 		chromedp.Click(submitElement, chromedp.NodeVisible),
-		chromedp.Sleep(time.Second * 5),
+		chromedp.Sleep(time.Second*5),
 		chromedp.SendKeys(passwordElement, azureADPassword),
 		chromedp.Click(submitElement, chromedp.NodeVisible),
-		chromedp.Sleep(time.Second * 5),
+		chromedp.Sleep(time.Second*5),
 		chromedp.Click(submitElement, chromedp.NodeVisible),
-		chromedp.Sleep(time.Second * 10),
+		chromedp.Sleep(time.Second*10),
 		chromedp.Click(`//*[@id="12"]/div/label`),
-		chromedp.Sleep(time.Second * 10),
+		chromedp.Sleep(time.Second*10),
 		chromedp.Click(`//*[@id="signin_button"]`),
-		chromedp.Tasks{
-			chromedp.ActionFunc(func(context context.Context) error {
-				network.Enable().Do(context)
-				return nil
-			}),
-		},
 		chromedp.Sleep(time.Minute)); err != nil {
 		return fmt.Errorf("could not navigate to azure: %v", err)
 	}
 
 	return nil
-}
-
-type NavigationState struct {
-	currentPage string
-	currentFrameID string
-	pageLoaded bool
-}
-
-func (n *NavigationState) SetPageNavigated(page string, frameId string) {
-	n.currentPage = page
-	n.currentFrameID = frameId
-	n.pageLoaded = false
-}
-
-func (n *NavigationState) SetPageLoaded(frameId string) error {
-	if n.currentFrameID != frameId {
-		return errors.New(fmt.Sprintf("invalid frame Id. Current: %s", n.currentFrameID))
-	}
-	n.pageLoaded = true
-	return nil
-}
-
-func (n *NavigationState) CurrentPage() string {
-	return n.currentPage
-}
-
-var pageState NavigationState
-var pageChan = make(chan string)
-
-func InterceptEvents(ev interface{}) {
-
-	if e, ok := ev.(*page.EventFrameNavigated); ok {
-		url := e.Frame.URL
-		frameId := e.Frame.ID.String()
-
-		log.Printf("[URL] %s. frame id: %s", url, frameId)
-		pageState.SetPageNavigated(url, frameId)
-		return
-	}
-
-	spew.Dump(ev)
-
-	if e, ok := ev.(*page.EventFrameStoppedLoading); ok {
-
-		log.Printf("[EVENT LOAD] Current page state: %v", pageState)
-		frameId := e.FrameID.String()
-
-		err := pageState.SetPageLoaded(frameId)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		currentPage := pageState.CurrentPage()
-		log.Printf("[PAGE LOADED] %s", currentPage)
-
-		pageChan <-currentPage
-		return
-	}
-	return
 }
 
 func createSAMLRequest(appID string, tenantID string) (string, error) {
@@ -196,10 +143,4 @@ func createSAMLRequest(appID string, tenantID string) (string, error) {
 	encodeUrl := fmt.Sprintf("https://login.microsoftonline.com/%s/saml2?SAMLRequest=%s", tenantID, encodedRequest)
 
 	return encodeUrl, nil
-}
-
-
-// projectDesc contains a url, description for a project.
-type projectDesc struct {
-	URL, Description string
 }
