@@ -16,3 +16,4 @@
 aws-azure-auth
 
 .idea
+*.xml
