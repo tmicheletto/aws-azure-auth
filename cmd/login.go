@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bufio"
 	"bytes"
 	"compress/flate"
 	"context"
@@ -17,19 +16,18 @@ import (
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 	"github.com/google/uuid"
+	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"net/url"
-	"os"
-	"path"
-	"strconv"
+	"os/exec"
 	"strings"
 	"time"
 )
 
 const AZURE_AD_SSO = "autologon.microsoftazuread-sso.com"
 const AWS_SAML_ENDPOINT = "https://signin.aws.amazon.com/saml"
-const AWS_CREDENTIALS_FILE_NAME = "my-credentials"
+const AWS_CREDENTIALS_FILE_NAME = "credentials"
 
 func init() {
 	rootCmd.AddCommand(loginCmd)
@@ -136,21 +134,18 @@ func execute(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	userName, err := prompt(fmt.Sprintf("Enter your AD user name or press enter to use default username (%s)", azureADUserName))
+	prompt := promptui.Prompt{Label: "Please enter your AD username", Default: azureADUserName}
+	username, err := prompt.Run()
 	if err != nil {
 		return err
 	}
 
-	if len(userName) == 0 {
-		fmt.Printf("Using default username %s\n", azureADUserName)
-		userName = azureADUserName
-	}
-
-	if err = chromedp.Run(ctx, chromedp.SendKeys(emailElement, userName, chromedp.ByQuery), chromedp.Click(submitElement, chromedp.ByQuery)); err != nil {
+	if err = chromedp.Run(ctx, chromedp.SendKeys(emailElement, username, chromedp.ByQuery), chromedp.Click(submitElement, chromedp.ByQuery)); err != nil {
 		return err
 	}
 
-	password, err := prompt("Enter your password")
+	prompt = promptui.Prompt{Label: "Please enter your password", Mask: '*'}
+	password, err := prompt.Run()
 	if err != nil {
 		return err
 	}
@@ -159,13 +154,20 @@ func execute(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	code, err := prompt("Enter the code sent to your device")
+	prompt = promptui.Prompt{Label: "Please enter the code sent to your device"}
+	code, err := prompt.Run()
 	if err != nil {
 		return err
 	}
 
-	if err = chromedp.Run(ctx, chromedp.SendKeys(otpElement, code, chromedp.ByQuery), chromedp.Click(verifyButtonSelector, chromedp.ByQuery), chromedp.WaitVisible(staySignedInCheckboxSelector, chromedp.ByQuery), chromedp.Click(staySignedInCheckboxSelector, chromedp.ByQuery) , chromedp.Submit(submitElement, chromedp.ByQuery), chromedp.WaitVisible(fieldsSelector, chromedp.ByQuery)); err != nil {
+	if err = chromedp.Run(ctx, chromedp.SendKeys(otpElement, code, chromedp.ByQuery), chromedp.Click(verifyButtonSelector, chromedp.ByQuery), chromedp.WaitVisible(staySignedInCheckboxSelector, chromedp.ByQuery), chromedp.Click(staySignedInCheckboxSelector, chromedp.ByQuery), chromedp.Submit(submitElement, chromedp.ByQuery), chromedp.WaitVisible(fieldsSelector, chromedp.ByQuery)); err != nil {
 		return err
+	}
+
+	acctsSelector := "#saml_form > fieldset > div.saml-account > div > div.saml-account-name"
+	var accounts []*cdp.Node
+	if err := chromedp.Run(ctx, chromedp.Nodes(acctsSelector, &accounts)); err != nil {
+		return fmt.Errorf("could not get projects: %v", err)
 	}
 
 	response, err := saml.ParseEncodedResponse(samlResponse)
@@ -175,17 +177,15 @@ func execute(cmd *cobra.Command, args []string) error {
 
 	roles := response.GetAttributeValues("https://aws.amazon.com/SAML/Attributes/Role")
 
-	for i, role := range roles {
-		tokens := strings.Split(role, ",")
-		roleArn := tokens[0]
-		fmt.Printf("%d. %s\n", i, roleArn)
+	accountsMap := buildAccountsMap(accounts)
+	options := buildAccountPrompt(roles, accountsMap)
+
+	listPrompt := promptui.Select{
+		Label: "Please select the role you want to assume",
+		Items: options,
 	}
 
-	answer, err := prompt("Please enter the number of the role you want to assume")
-	if err != nil {
-		return err
-	}
-	roleIdx, err := strconv.Atoi(answer)
+	roleIdx, _, err := listPrompt.Run()
 	if err != nil {
 		return err
 	}
@@ -234,61 +234,59 @@ func createSAMLRequest(appID string, tenantID string) (string, error) {
 }
 
 func writeCredentials(creds *sts.Credentials) error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
+	cmd := exec.Command("aws", "configure", "set", "aws_access_key_id", *creds.AccessKeyId)
+	if err := cmd.Run(); err != nil {
 		return err
 	}
-	credsFile := path.Join(homeDir, ".aws", AWS_CREDENTIALS_FILE_NAME)
-	if err := touchFile(credsFile); err != nil {
-		return err
-	}
-
-	awsConfig := viper.New()
-	awsConfig.SetConfigName(AWS_CREDENTIALS_FILE_NAME) // name of config file (without extension)
-	awsConfig.SetConfigType("toml") // REQUIRED if the config file does not have the extension in the name
-	awsConfig.AddConfigPath(path.Join(homeDir, ".aws"))  // call multiple times to add many search paths
-	if err := awsConfig.ReadInConfig(); err != nil {
+	cmd = exec.Command("aws", "configure", "set", "aws_secret_access_key", *creds.SecretAccessKey)
+	if err := cmd.Run(); err != nil {
 		return err
 	}
 
-	awsConfig.Set("MyCreds.aws_access_key_id", *creds.AccessKeyId)
-	awsConfig.Set("MyCreds.aws_secret_access_key", *creds.SecretAccessKey)
-
-	if err := awsConfig.WriteConfig(); err != nil {
+	cmd = exec.Command("aws", "configure", "set", "aws_session_token", *creds.SessionToken)
+	if err := cmd.Run(); err != nil {
 		return err
 	}
 	return nil
 }
 
-func touchFile(path string) error {
-	_, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		file, err := os.Create(path)
-		if err != nil {
-			return err
-		}
-		defer file.Close()
-	}
-	return nil
-}
-
-func prompt(question string) (string, error) {
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Printf("%v: ", question)
-	answer, err := reader.ReadString('\n')
-	if err != nil {
-		return answer, err
-	}
-	return strings.TrimSpace(answer), nil
-}
-
-func parseRole (role string, samlAssertion string) *sts.AssumeRoleWithSAMLInput {
+func parseRole(role string, samlAssertion string) *sts.AssumeRoleWithSAMLInput {
 	tokens := strings.Split(role, ",")
 
 	return &sts.AssumeRoleWithSAMLInput{
-		RoleArn: aws.String(tokens[0]),
-		PrincipalArn: aws.String(tokens[1]),
-		SAMLAssertion: aws.String(samlAssertion),
+		RoleArn:         aws.String(tokens[0]),
+		PrincipalArn:    aws.String(tokens[1]),
+		SAMLAssertion:   aws.String(samlAssertion),
 		DurationSeconds: aws.Int64(2400),
 	}
+}
+
+func parseAccountNumberFromRoleARN(roleArn string) string {
+	tokens := strings.Split(roleArn, ":")
+	return tokens[4]
+}
+
+func buildAccountsMap(accounts []*cdp.Node) map[string]string {
+	accountsMap := make(map[string]string)
+	for _, account := range accounts {
+		node := (*account).Children[0]
+		accountText := (*node).NodeValue
+		tokens := strings.Split(accountText, "(")
+		tokens = strings.Split(tokens[1], ")")
+
+		accountsMap[tokens[0]] = accountText
+	}
+	return accountsMap
+}
+
+func buildAccountPrompt(roles []string, accountsMap map[string]string) []string {
+	roleArns := make([]string, 0)
+	for _, role := range roles {
+		tokens := strings.Split(role, ",")
+		roleArn := tokens[0]
+
+		accountNumber := parseAccountNumberFromRoleARN(roleArn)
+		roleArns = append(roleArns, fmt.Sprintf("%s -> Role: %s", accountsMap[accountNumber], roleArn))
+	}
+	return roleArns
 }
