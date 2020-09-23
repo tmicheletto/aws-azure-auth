@@ -1,13 +1,10 @@
 package cmd
 
 import (
-	"bytes"
-	"compress/flate"
+	"aws-azure-auth/internal/pkg/saml"
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
-	"github.com/RobotsAndPencils/go-saml"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/external"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
@@ -15,18 +12,15 @@ import (
 	"github.com/chromedp/cdproto/fetch"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
-	"github.com/google/uuid"
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"net/url"
 	"os/exec"
 	"strings"
-	"time"
 )
 
 const AZURE_AD_SSO = "autologon.microsoftazuread-sso.com"
-const AWS_SAML_ENDPOINT = "https://signin.aws.amazon.com/saml"
 const AWS_CREDENTIALS_FILE_NAME = "credentials"
 
 func init() {
@@ -106,16 +100,18 @@ func execute(cmd *cobra.Command, args []string) error {
 
 	azureAppUri := fmt.Sprintf("http://%s", viper.GetString("azureAppId"))
 	fmt.Println(azureAppUri)
+
 	azureTenantId := viper.GetString("azureTenantId")
 	fmt.Println(azureTenantId)
 
 	azureADUserName := viper.GetString("azureADUserName")
 	fmt.Println(azureADUserName)
 
-	url, err := createSAMLRequest(azureAppUri, azureTenantId)
+	samlRequest, err := saml.CreateSAMLRequest(azureAppUri)
 	if err != nil {
 		return fmt.Errorf("could not create SAML request: %v", err)
 	}
+	url := fmt.Sprintf("https://login.microsoftonline.com/%s/saml2?SAMLRequest=%s", azureTenantId, url.QueryEscape(samlRequest))
 
 	// navigate
 	emailElement := "#i0116"
@@ -128,7 +124,7 @@ func execute(cmd *cobra.Command, args []string) error {
 
 	if err := chromedp.Run(ctx,
 		network.Enable(),
-		fetch.Enable().WithPatterns([]*fetch.RequestPattern{{URLPattern: AWS_SAML_ENDPOINT, RequestStage: "Response"}}).WithHandleAuthRequests(true),
+		fetch.Enable().WithPatterns([]*fetch.RequestPattern{{URLPattern: saml.AWS_SAML_ENDPOINT, RequestStage: "Response"}}).WithHandleAuthRequests(true),
 		chromedp.Navigate(url),
 		chromedp.WaitVisible(emailElement, chromedp.ByQuery)); err != nil {
 		return err
@@ -170,12 +166,10 @@ func execute(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("could not get projects: %v", err)
 	}
 
-	response, err := saml.ParseEncodedResponse(samlResponse)
+	roles, err := saml.ParseRolesFromSAMLResponse(samlResponse)
 	if err != nil {
 		return err
 	}
-
-	roles := response.GetAttributeValues("https://aws.amazon.com/SAML/Attributes/Role")
 
 	accountsMap := buildAccountsMap(accounts)
 	options := buildAccountPrompt(roles, accountsMap)
@@ -204,33 +198,6 @@ func execute(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("Successfully assumed role %s. Writing credentials...\n", *input.RoleArn)
 	return writeCredentials(out.Credentials)
-}
-
-func createSAMLRequest(appID string, tenantID string) (string, error) {
-	samlTemplate := `
-        <samlp:AuthnRequest xmlns="urn:oasis:names:tc:SAML:2.0:metadata" ID="id%s" Version="2.0" IssueInstant="%s" IsPassive="false" AssertionConsumerServiceURL="%s" xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol">
-            <Issuer xmlns="urn:oasis:names:tc:SAML:2.0:assertion">%s</Issuer>
-            <samlp:NameIDPolicy Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress"></samlp:NameIDPolicy>
-        </samlp:AuthnRequest>
-        `
-	request := fmt.Sprintf(samlTemplate, uuid.New().String(), time.Now().Format(time.RFC3339), AWS_SAML_ENDPOINT, appID)
-
-	var b bytes.Buffer
-
-	w, err := flate.NewWriter(&b, flate.BestSpeed)
-	if err != nil {
-		return "", err
-	}
-
-	w.Write([]byte(request))
-	if err = w.Close(); err != nil {
-		return "", err
-	}
-
-	encodedRequest := url.QueryEscape(base64.StdEncoding.EncodeToString(b.Bytes()))
-	encodeUrl := fmt.Sprintf("https://login.microsoftonline.com/%s/saml2?SAMLRequest=%s", tenantID, encodedRequest)
-
-	return encodeUrl, nil
 }
 
 func writeCredentials(creds *sts.Credentials) error {
